@@ -11,6 +11,8 @@ import argparse
 import glob
 import os
 import re
+import resource
+import shutil
 import subprocess
 import sys
 import time
@@ -125,11 +127,27 @@ def RunEngineExecutable(build_dir, executable_name, filter, flags=[],
   print('Running %s in %s' % (executable_name, cwd))
   test_command = [ executable ] + flags
   print(' '.join(test_command))
-  RunCmd(test_command, cwd=cwd, forbidden_output=forbidden_output, expect_failure=expect_failure, env=env)
 
+  try:
+    RunCmd(test_command, cwd=cwd, forbidden_output=forbidden_output, expect_failure=expect_failure, env=env)
+  except:
+    # The LUCI environment may provide a variable containing a directory path
+    # for additional output files that will be uploaded to cloud storage.
+    # If the command generated a core dump, then capture the core along with
+    # the unstripped executable that generated it.
+    luci_test_outputs_path = os.environ.get('FLUTTER_TEST_OUTPUTS_DIR')
+    core_path = os.path.join(cwd, 'core')
+    if luci_test_outputs_path and os.path.exists(core_path) and os.path.exists(unstripped_exe):
+      executable_id = '%s_%s' % (executable_name, sys.platform)
+      os.rename(core_path, os.path.join(luci_test_outputs_path, '%s_core' % executable_id))
+      shutil.copy(unstripped_exe, os.path.join(luci_test_outputs_path, executable_id))
+    raise
 
-def RunCCTests(build_dir, filter):
+def RunCCTests(build_dir, filter, capture_core_dump):
   print("Running Engine Unit-tests.")
+
+  if capture_core_dump:
+    resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 
   # Not all of the engine unit tests are designed to be run more than once.
   non_repeatable_shuffle_flags = [
@@ -513,6 +531,8 @@ def main():
       default=False, help='Show extra dart snapshot logging.')
   parser.add_argument('--objc-filter', type=str, default=None,
       help='Filter parameter for which objc tests to run (example: "IosUnitTestsTests/SemanticsObjectTest/testShouldTriggerAnnouncement")')
+  parser.add_argument('--engine-capture-core-dump', dest='engine_capture_core_dump', action='store_true',
+      default=False, help='Capture core dumps from crashes of engine tests.')
 
   args = parser.parse_args()
 
@@ -527,7 +547,7 @@ def main():
 
   engine_filter = args.engine_filter.split(',') if args.engine_filter else None
   if 'engine' in types:
-    RunCCTests(build_dir, engine_filter)
+    RunCCTests(build_dir, engine_filter, args.engine_capture_core_dump)
 
   if 'dart' in types:
     assert not IsWindows(), "Dart tests can't be run on windows. https://github.com/flutter/flutter/issues/36301."
